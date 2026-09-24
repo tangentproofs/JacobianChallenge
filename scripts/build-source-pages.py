@@ -13,8 +13,8 @@ Output layout (relative to OUT_DIR, which the Pages workflow mounts at
     declarations.json              -- {fully-qualified decl name: relative URL}
     find/index.html                -- JS redirector (local or mathlib4_docs fallback)
     decls/<rel>.json               -- per-file outline {imports, decls}
-    Jacobian/...                   -- one HTML page per .lean source file,
-                                      mirroring the import path
+    <rel>.html                     -- one HTML page per .lean source file,
+                                      paths relative to --src-root
 
 Decl/namespace extraction is regex-based, not a real Lean parser. It is
 deliberately conservative: missed names just mean the corresponding
@@ -165,7 +165,7 @@ INDEX_TPL = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Jacobian Challenge — browsable source</title>
+<title>{title} — browsable source</title>
 <link rel="stylesheet" href="site.css">
 </head>
 <body class="page">
@@ -174,16 +174,17 @@ INDEX_TPL = """<!doctype html>
   <nav class="tree" id="tree" aria-label="File tree"></nav>
 </aside>
 <main>
-  <header><strong>Jacobian Challenge — source</strong></header>
+  <header><strong>{title} — source</strong></header>
   <div class="welcome">
+    {featured_block}
     <p>Pick a file from the tree on the left.</p>
-    <p>Identifier links from the <a href="../blueprint/">blueprint</a> resolve through
+    <p>Identifier links resolve through
     <code>find/#doc/&lt;Name&gt;</code>; declarations defined in this repository jump
     here, anything else falls through to the
     <a href="https://leanprover-community.github.io/mathlib4_docs/">official Mathlib docs</a>.</p>
   </div>
 </main>
-<script>window.PAGE = { relpath: null, root: "" };</script>
+<script>window.PAGE = {{ relpath: null, root: "" }};</script>
 <script src="app.js"></script>
 </body>
 </html>
@@ -634,17 +635,38 @@ def build_tree(rel_paths_no_ext: list[str]) -> dict:
     return root
 
 
+def iter_project_lean_files(src_root: Path):
+    """Yield .lean files under src_root, skipping hidden dirs (e.g. .lake)."""
+    for src_path in sorted(src_root.rglob("*.lean")):
+        try:
+            rel = src_path.relative_to(src_root)
+        except ValueError:
+            continue
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        yield src_path
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--src-root", default="Jacobian",
                     help="Directory containing .lean files (relative to repo root).")
     ap.add_argument("--out", required=True, help="Output directory.")
-    ap.add_argument("--github-url", default="https://github.com/tangentstorm/JacobianChallenge/blob/main",
-                    help="Base URL for the GitHub source link.")
+    ap.add_argument("--github-url",
+                    default="https://github.com/tangentproofs/JacobianChallenge/blob/main/Jacobian",
+                    help="Base URL for the GitHub source link (should point at --src-root).")
+    ap.add_argument("--title", default="Jacobian Challenge",
+                    help="Project title for the docs index page.")
+    ap.add_argument("--featured", default="",
+                    help="Optional featured entry (path relative to --src-root, no .lean); "
+                         "linked from the docs welcome page.")
     args = ap.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
     src_root = (repo_root / args.src_root).resolve()
+    if not src_root.is_dir():
+        print(f"error: --src-root not a directory: {src_root}", file=sys.stderr)
+        return 1
     out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -671,9 +693,9 @@ def main() -> int:
     decls_dir.mkdir(exist_ok=True)
 
     decls_index: dict[str, str] = {}
-    rel_paths: list[str] = []  # without .lean extension
-    for src_path in sorted(src_root.rglob("*.lean")):
-        rel = src_path.relative_to(repo_root).as_posix()
+    rel_paths: list[str] = []  # without .lean extension, relative to src_root
+    for src_path in iter_project_lean_files(src_root):
+        rel = src_path.relative_to(src_root).as_posix()
         rel_no_ext = rel[:-len(".lean")]
         rel_html = rel_no_ext + ".html"
         depth = rel.count("/")
@@ -726,7 +748,20 @@ def main() -> int:
     find_dir.mkdir(exist_ok=True)
     (find_dir / "index.html").write_text(FIND_TPL, encoding="utf-8")
 
-    (out_dir / "index.html").write_text(INDEX_TPL, encoding="utf-8")
+    featured = (args.featured or "").strip().lstrip("/")
+    if featured:
+        featured_href = html.escape(featured + ".html", quote=True)
+        featured_label = html.escape(featured + ".lean")
+        featured_block = (
+            f'<p class="featured">Start here: '
+            f'<a href="{featured_href}"><code>{featured_label}</code></a>.</p>'
+        )
+    else:
+        featured_block = ""
+    (out_dir / "index.html").write_text(
+        INDEX_TPL.format(title=html.escape(args.title), featured_block=featured_block),
+        encoding="utf-8",
+    )
 
     print(f"wrote {len(rel_paths)} pages, {len(decls_index)} declarations -> {out_dir}",
           file=sys.stderr)
